@@ -380,7 +380,7 @@ def get_style_model_and_losses(model, hsi_img, style_layers=['encoder_upperBlock
 #
 #    #
 class GramLoss(Module):
-    def __init__(self, perceptual_model, style_loss = StyleLoss(), content_loss = MSELoss(reduction = 'mean')):
+    def __init__(self, perceptual_model, style_loss = StyleLoss(), content_loss = MSELoss(reduction = 'mean'), device = 'cpu'):
         super(GramLoss, self).__init__()
         self.perceptual_model = perceptual_model
         self.styleLoss = style_loss
