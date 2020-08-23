@@ -387,6 +387,7 @@ class GramLoss(Module):
         self.styleLoss.to(device)
         self.contentLoss = content_loss
         self.contentLoss.to(device)
+        self.device = device
         
     def forward(self, img_recon, img_gt):
         perceptualFeat_gt = {}
@@ -422,7 +423,7 @@ class GramLoss(Module):
         style = self.styleLoss
         
         # Calcular las losses
-        style_loss = torch.zeros(1, requires_grad = True, device = device)
+        style_loss = torch.zeros(1, requires_grad = True, device = self.device)
         #style_loss.to(device)
         for block in blocks_list:
             style((perceptualFeat_gt[block], perceptualFeat_reconstructed[block]))
@@ -432,12 +433,12 @@ class GramLoss(Module):
         content_loss = self.contentLoss(img_recon, img_gt)
         #content_loss = Variable(content_loss, requires_grad = True)
         content_loss.requieres_grad = True
-        content_loss.to(device)
+        content_loss.to(self.device)
         #print(f'content_loss attached: {content_loss.requires_grad}')
         #print(f'style_loss attached: {style_loss.requires_grad}')
         loss = 1*content_loss + 1e-3*style_loss
         #print(loss)
-        loss.to(device)
+        loss.to(self.device)
         #print(f'loss attached: {loss.requires_grad}')
         return loss
     
