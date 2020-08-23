@@ -10,7 +10,6 @@ from torch.autograd import Variable
 import matplotlib.pyplot as plt
 import seaborn as sn
 from spectral import *
-from metrics import *
 
 
 #### MODELOS

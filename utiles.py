@@ -10,7 +10,6 @@ from torch.autograd import Variable
 import matplotlib.pyplot as plt
 import seaborn as sn
 from spectral import *
-from metrics import *
 
 
 def show_spectral_reconstruction(model, hyper_path, multi_path, pos_row, pos_col, scene_patch, wav_hsi, wav_msi):
@@ -144,7 +143,7 @@ def make_train_step(model, loss_fn, optimizer):
 
     return train_step
 
-def train_model(model, n_epochs, loss_fn, optimizer, train_loader, val_loader):
+def train_model(model, n_epochs, loss_fn, optimizer, train_loader, val_loader, device = 'cpu'):
     # Base hiperparameters for the training
     losses = []
     #psnr_train = []
