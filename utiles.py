@@ -10,6 +10,7 @@ from torch.autograd import Variable
 import matplotlib.pyplot as plt
 import seaborn as sn
 from spectral import *
+from metrics import SSIM
 
 
 def show_spectral_reconstruction(model, hyper_path, multi_path, pos_row, pos_col, scene_patch, wav_hsi, wav_msi):
