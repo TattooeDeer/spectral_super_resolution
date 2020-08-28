@@ -26,19 +26,23 @@ class Hourglass(Module):
         
         self.decoder_lowerBlock = self.ConvBatchNormReLUx1(lb_outCh, lb_outCh)
         self.decoder_middleBlock = self.ConvBatchNormReLUx2(lb_outCh, mb_outCh, stride2 = 1, upsample = False, kernel_size = 5, padding = 2)
-        self.decoder_upperBlock = self.ConvBatchNormReLUx2(mb_outCh, out_channels, stride2 = 1, upsample = False)
+        self.decoder_upperBlock = self.ConvBatchNormReLUx2(mb_outCh, out_channels, stride2 = 1, upsample = False, final_layer = True)
         
 
-    def ConvBatchNormReLUx2(self, in_ch, out_ch, kernel_size = 3, stride1 = 1, stride2 = 2, padding = 1, upsample = False, upsample_ratio = 2):
+    def ConvBatchNormReLUx2(self, in_ch, out_ch, kernel_size = 3, stride1 = 1, stride2 = 2, padding = 1, upsample = False, upsample_ratio = 2,
+                            final_layer = False):
         first_layer =  nn.Sequential(
             nn.Conv2d(in_ch, out_ch, kernel_size, stride1, padding),
-            nn.LeakyReLU(inplace = True))
-            #nn.BatchNorm2d(out_ch))
-        
-        second_layer = nn.Sequential(
-            nn.Conv2d(out_ch, out_ch, kernel_size, stride2, padding),
-            nn.LeakyReLU(inplace = True))
-            #nn.BatchNorm2d(out_ch))
+            nn.ELU(inplace = True))
+
+        if final_layer:
+            second_layer = nn.Sequential(
+                nn.Conv2d(out_ch, out_ch, kernel_size, stride2, padding),
+                )
+        else:
+            second_layer = nn.Sequential(
+                nn.Conv2d(out_ch, out_ch, kernel_size, stride2, padding),
+                nn.ELU(inplace = True))
         
         if upsample is True:
             return nn.Sequential(first_layer, nn.Upsample(scale_factor = upsample_ratio), second_layer)
@@ -93,8 +97,6 @@ class Koundinya2D_CNN(Module):
             ReLU(inplace = True),
 
             Conv2d(in_channels = 100, out_channels = 175, kernel_size = 3, stride = 1, padding = 1),
-            ReLU(inplace = True)
-
         )
         
         

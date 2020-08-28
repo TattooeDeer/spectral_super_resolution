@@ -2,6 +2,7 @@
 
 import torch
 import numpy as np
+import pandas as pd
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn import Sequential, ReLU, Conv2d, BatchNorm2d, MaxPool2d, Conv3d, BatchNorm3d, MaxPool3d, Module, MSELoss, ConvTranspose2d, ConvTranspose3d
@@ -11,9 +12,11 @@ import matplotlib.pyplot as plt
 import seaborn as sn
 from spectral import *
 from metrics import SSIM
+import re
+import glob
 
 
-def show_spectral_reconstruction(model, hyper_path, multi_path, pos_row, pos_col, scene_patch, wav_hsi, wav_msi):
+def show_spectral_reconstruction(model, hyper_path, multi_path, pos_row, pos_col, scene_patch, wav_hsi, wav_msi, device = 'cpu'):
     """
     Shows the spectral reconstruction accomplished by a model selecting a random pixel position and a random scene/patch, for this, a lineplot of a 
     alongside the  
@@ -44,13 +47,13 @@ def show_spectral_reconstruction(model, hyper_path, multi_path, pos_row, pos_col
     fig.suptitle(f'Scene {scene_patch}', fontsize=16)
 
 
-    sn.lineplot(x = wav_hsi.Wavelength.values, y = patch_hyp[pos_row,pos_col,:]/10000, 
+    sn.lineplot(x = wav_hsi['Wavelength [micro m]'].values, y = patch_hyp[pos_row,pos_col,:]/10000, 
                 label = 'True Hyperion Spectra', ax = ax, marker = 'o')
-    sn.lineplot(x = wav_hsi.Wavelength.values, y = yhat_cpu[pos_row, pos_col, :]/10000, 
+    sn.lineplot(x = wav_hsi['Wavelength [micro m]'].values, y = yhat_cpu[pos_row, pos_col, :]/10000, 
                 label = 'Reconstructed Spectra', ax = ax, marker = 'o')
-    sn.lineplot(x = wav_msi.Wavelength.values, y = patch_landsat[pos_row, pos_col, :]/10000, marker = "o",
+    sn.lineplot(x = wav_msi['Wavelength [micro m]'].values, y = patch_landsat[pos_row, pos_col, :]/10000, marker = "o",
                 label = 'Original LandSat-8 OLI Spectra', ax = ax)
-    ax.set_xlabel('Wavelength [nm]', fontsize = 12)
+    ax.set_xlabel('Wavelength [micro m]', fontsize = 12)
     ax.set_ylabel('Reflectance (prop.)', fontsize = 12)
     sn.despine()
     
@@ -77,49 +80,51 @@ def show_spectral_reconstruction(model, hyper_path, multi_path, pos_row, pos_col
 
 
 ## Codigo para sacar las longitudes de onda de hyperion
-def get_hyperion_landsat_bands(hyperion_properties_path = 'Images/propertiesH_metadata.txt', landsat_properties_path = "Images/propertiesL8_metadata.txt"):
+def get_hyperion_landsat_bands(hyperion_properties_path, landsat_properties_path, hyperion_imgs_path = 'Images/hyperion_test_npy'):
     """
         Reads a metadata file from Hyperion; LandSat and returns a dataset with the corresponding wavelengths associated with earch band, useful for plotting the spectral reconstruction.
         
     Args:
+        - hyperion_imgs_path (string): Path to the patches of hyperion. 
         - hyperion_properties_path (string): The path to the metadata file of any hyperion image, it should be a .txt file.
         - landsat_properties_path (string): The path to the metadata file of any hyperion image, it should be a .txt file.
         
     """
     
-    dfprop_Hyperion = pd.DataFrame(columns = ['Band_n', 'Wavelength']) 
+    dfprop_Hyperion = pd.DataFrame(columns = ['Band_n', 'Wavelength [micro m]']) 
     regex_wavelenght = re.compile(r'(\d+) = (.*)')
     properties_h = open(hyperion_properties_path, "r")
     regex_wavelenght = re.compile(r'(\d+) = (.*)')
     
-    dfprop_Hyperion = pd.DataFrame(columns = ['Band_n', 'Wavelength']) 
+    dfprop_Hyperion = pd.DataFrame(columns = ['Band_n', 'Wavelength [micro m]']) 
     
     
     for line in properties_h:
         if 'Wavelengths' in line:
             if len(regex_wavelenght.findall(line)) > 0:
                 dfprop_Hyperion = dfprop_Hyperion.append({'Band_n': int(regex_wavelenght.findall(line)[0][0]),
-                                       'Wavelength': float(regex_wavelenght.findall(line)[0][1])/1000}, ignore_index = True)
+                                       'Wavelength [micro m]': float(regex_wavelenght.findall(line)[0][1])/1000}, ignore_index = True)
     
     
     properties_h = open(landsat_properties_path, "r")
     
-    dfprop_L8 = pd.DataFrame(columns = ['Band_n', 'Wavelength']) 
+    dfprop_L8 = pd.DataFrame(columns = ['Band_n', 'Wavelength [micro m]']) 
     
     for line in properties_h:
         if 'Wavelengths' in line:
             if len(regex_wavelenght.findall(line)) > 0:
                 dfprop_L8 = dfprop_L8.append({'Band_n': int(regex_wavelenght.findall(line)[0][0]),
-                                       'Wavelength': float(regex_wavelenght.findall(line)[0][1])}, ignore_index = True)
+                                       'Wavelength [micro m]': float(regex_wavelenght.findall(line)[0][1])}, ignore_index = True)
     
     dfprop_Hyperion.set_index('Band_n', inplace = True)
     dfprop_L8.set_index('Band_n', inplace = True)
-    scenes_patches_list = [re.findall(r'\\(.*)\.npy', path)[0] for path in glob.glob('Images/hyperion_test_npy/*.npy')]
+    scenes_patches_list = [re.findall(re.compile(r'\\(.*)\.npy$'), path)[0] for path in glob.glob(f'{hyperion_imgs_path}/*.npy')]
     hyperion_BadBands = list(range(1,8)) + list(range(58,77)) + list(range(225,243)) + list(range(121,127)) +\
-                            list(range(167,181)) + list(range(222,225))
+                            list(range(167,181)) + list(range(222,242))
     dfprop_Hyperion.drop(hyperion_BadBands, inplace = True)
+    dfprop_Hyperion.reset_index(inplace = True)
     
-    return (dfprop_Hyperion, dfprop_L8)
+    return (dfprop_Hyperion, dfprop_L8, scenes_patches_list)
 
 
 ###############################################################################################
@@ -149,7 +154,9 @@ def train_model(model, n_epochs, loss_fn, optimizer, train_loader, val_loader, d
     losses = []
     #psnr_train = []
     val_losses = []
+    val_ssim = []
     train_step = make_train_step(model, loss_fn, optimizer)
+    ssim = SSIM()
     
     
     for epoch in range(n_epochs):
@@ -165,7 +172,7 @@ def train_model(model, n_epochs, loss_fn, optimizer, train_loader, val_loader, d
             
             with torch.no_grad():
                 val_losses_batch = []
-                val_psnr_batch = []
+                val_ssim_batch = []
                 for x_val, y_val in val_loader:
                     x_val = x_val.to(device)
                     y_val = y_val.to(device)
@@ -174,72 +181,102 @@ def train_model(model, n_epochs, loss_fn, optimizer, train_loader, val_loader, d
                     
                     yhat = model(x_val).reshape(x_val.shape[0], 175, 64, 64)
                     val_loss = loss_fn(y_val, yhat)
+                    val_ssim_batch.append(ssim(y_val, yhat).item())
                     val_losses_batch.append(val_loss.item())
+                val_ssim.append(np.mean(val_ssim_batch))
                 val_losses.append(np.mean(val_losses_batch))
                 print(f'\t  * Val loss: {val_losses[-1]}')
-    return {'train_losses': losses, 'val_losses': val_losses}
+                print(f'\t  * Val SSIM: {val_ssim[-1]}')
+    return {'train_losses': losses, 'val_losses': val_losses, 'val_ssim': val_ssim}
 
 
 ###############################################################################################
 
 
-def get_metrics(model, test_loader, device = 'cpu', losses_train = None):
-    # No prints
+def get_metrics(model, test_loader, device = 'cpu', train_dict = None, per_band_error = False, prop_hyperion = None):
     test_ssims = []
     test_losses = []
     loss_fn = MSELoss(reduction = 'mean')
-    n_plots = 3 if losses_train != None else 2
+    #mse_noReduction = MSELoss(reduction = 'none')
+    dict_bands = {}
     ssim = SSIM()
+
+
+    if per_band_error and (prop_hyperion is not None):
+        dict_bands['Coastal Aerosol'] = prop_hyperion[(prop_hyperion['Wavelength [micro m]'] >= 0.43) & (prop_hyperion['Wavelength [micro m]'] <= 0.45)].index.values
+        dict_bands['Blue'] = prop_hyperion[(prop_hyperion['Wavelength [micro m]'] >= 0.45) & (prop_hyperion['Wavelength [micro m]'] <= 0.51)].index.values
+        dict_bands['Green'] = prop_hyperion[(prop_hyperion['Wavelength [micro m]'] >= 0.53) & (prop_hyperion['Wavelength [micro m]'] <= 0.59)].index.values
+        dict_bands['Red'] = prop_hyperion[(prop_hyperion['Wavelength [micro m]'] >= 0.64) & (prop_hyperion['Wavelength [micro m]'] <= 0.67)].index.values
+        dict_bands['NIR'] = prop_hyperion[(prop_hyperion['Wavelength [micro m]'] >= 0.85) & (prop_hyperion['Wavelength [micro m]'] <= 0.88)].index.values
+        dict_bands['SWIR 1'] = prop_hyperion[(prop_hyperion['Wavelength [micro m]'] >= 1.57) & (prop_hyperion['Wavelength [micro m]'] <= 1.65)].index.values
+        dict_bands['SWIR 2'] = prop_hyperion[(prop_hyperion['Wavelength [micro m]'] >= 2.11) & (prop_hyperion['Wavelength [micro m]'] <= 2.29)].index.values
+        dict_bands['Panchromatic'] = prop_hyperion[(prop_hyperion['Wavelength [micro m]'] >= 0.50) & (prop_hyperion['Wavelength [micro m]'] <= 0.68)].index.values
+        # Con los numeros de banda seleccionar los subtensores de y_test e yhat y meterlo MSE, luego meter los correspondientes valores
+        # a una lista asociada a cada banda
+    
+    
+    band_errors = dict([(k, []) for k in dict_bands.keys()])
     
     with torch.no_grad():
-        for i, (x_test, y_test) in enumerate(test_loader):
+        for _, (x_test, y_test) in enumerate(test_loader):
             x_test = x_test.to(device)
             y_test = y_test.to(device)
             model.eval()
             
             yhat = model(x_test)
             yhat = yhat.reshape(1,175,64,64)
-            test_ssim = ssim(y_test, yhat)
-            test_ssims.append(test_ssim.item())
-    
-    
-    
-    with torch.no_grad():
-        for i, (x_test, y_test) in enumerate(test_loader):
-            if i == 21:
-                break
-            x_test = x_test.to(device)
-            y_test = y_test.to(device).squeeze(0).reshape(175,64,64).permute(1,2,0)
             
-            model.eval()
-            
-            yhat = model(x_test).squeeze(0).reshape(175,64,64).permute(1,2,0) #queda lista
+            #yhat2 = yhat.clone().squeeze(0).reshape(175,64,64).permute(1,2,0)
             test_loss = loss_fn(y_test, yhat)
-            test_losses.append(test_loss.item())
-    
+            if per_band_error and prop_hyperion is not None:
+                for band in band_errors.keys():
+                    #print(y_test[:,dict_bands[band][0]:dict_bands[band][1], :, :].shape)
+                    band_errors[band].append(loss_fn(y_test[:, dict_bands[band][0]:dict_bands[band][1], :, :],
+                                                     yhat[:, dict_bands[band][0]:dict_bands[band][1], :, :]).item())
+
+            test_losses.append(test_loss.item()) 
+            test_ssims.append(ssim(y_test, yhat).item())
+  
     print(f'Average MSE (Test): {np.mean(test_losses)}')
     print(f'RMSE (Test): {np.sqrt(np.mean(test_losses))}')
-    print(f'RMSE scaled to reflectance (Test: {np.sqrt(np.mean(test_losses))/10000}')
-    print(f'Average SSIM(Test): {np.mean(test_ssims)}')
+    print(f'RMSE scaled to reflectance (Test): {np.sqrt(np.mean(test_losses))/10000}')
+    print(f'Average SSIM (Test): {np.mean(test_ssims)}')
+    for band in band_errors.keys():
+        print(f'- {band} Band Average RMSE scaled to radiance (Test): {np.sqrt(np.mean(band_errors[band]))/10000}')
     
+    if train_dict != None:
+        plt.rcParams['figure.figsize'] = (17,10)
+        fig, ax1 = plt.subplots(figsize = (17,4))
     
-    plt.rcParams['figure.figsize'] = (12,10)
-    plt.subplot(1, n_plots, 1)
+        ax2 = ax1.twinx()
+        sn.lineplot(x = range(len(train_dict['train_losses'])), y = train_dict['train_losses'], 
+                    label = 'Train MSE per batch', ax = ax1, color = 'dodgerblue')
+        sn.lineplot(x = range(len(train_dict['val_losses'])), y = train_dict['val_losses'], 
+                    label = 'Validation MSE per batch', ax = ax1, color = 'tomato')
+        sn.lineplot(x = range(len(train_dict['val_ssim'])), y = train_dict['val_ssim'], 
+                    label = 'Validation SSIM per batch', ax = ax2, color = 'darkgreen')
+        sn.despine()
+        ax2.legend(loc =  7, fontsize = 12)
+        ax1.legend(fontsize = 12)
+        plt.plot();
+    
+    fig,_ = plt.subplots(figsize = (17,10))
+    plt.subplot(1, 2, 1)
     sn.distplot(test_ssims)
-    plt.title('Distribucion de SSIMs (Test', size = 15)
+    plt.axvline(np.mean(test_ssims), label = 'Media del SSIM para Test')
+    plt.title('Distribucion de SSIMs (Test)', size = 15)
+    plt.legend()
     
     
-    plt.subplot(1, n_plots, 2)
+    plt.subplot(1, 2, 2)
     sn.distplot(test_losses)
+    plt.axvline(np.mean(test_losses), label = 'Media del MSE para Test')
     plt.xticks(rotation = 45)
     plt.title('Distribucion de MSE (Test)', size = 15);
+    plt.legend()
     
-    
-    if losses_train != None:
-        plt.subplot(1, n_plots, 3)
-        sn.distplot(losses_train)
-        plt.xticks(rotation = 45)
-        plt.title('Distribucion de MSE (Train)', size = 15);
+    return {'test_losses': test_losses, 'test_ssims':test_ssims}
+                                                                                                                
         
 
 def get_activation(name, activation_dict):
@@ -322,66 +359,10 @@ def get_style_model_and_losses(model, hsi_img, style_layers=['encoder_upperBlock
 
     return model, style_losses, content_losses
 
-#def add_noise(img,noise_type="gaussian"):
-#    row,col=64,64
-#    img=img.astype(np.float32)
-#    
-#    if noise_type=="gaussian":
-#        mean=0
-#        var=10
-#        sigma=var**.5
-#        noise=np.random.normal(-5.9,5.9,img.shape)
-#        #noise=noise.reshape(row,col)
-#        img=img+noise
-#        return img
-#
-#    if noise_type=="speckle":
-#        noise=np.random.randn(row,col)
-#        noise=noise.reshape(row,col)
-#        img=img+img*noise
-#        return img
-#
-#class SpectralDataset_Noised(torch.Dataset):
-#    def __init__(self, root_dir_multi, root_dir_hyp, transforms = None, percent_noise = 1):
-#        """
-#        Args:
-#            root_dir_multi (string): Path to the root directory of the multispectral images.
-#            root_dir_hyper (string): Path to the root directory of the hyperspectral images.
-#            transforms (torch.Compose): Transformations to apply to the data.
-#
-#        """
-#        self.noise = torch.randn(self.data.shape)*10000
-#        self.percent_noise = percent_noise
-#        self.transforms = transforms
-#        self.msi_path_list = glob.glob(root_dir_multi+'/*.npy')
-#        self.hsi_path_list = glob.glob(root_dir_hyp+'/*.npy')
-#        if len(self.msi_path_list) != len(self.hsi_path_list):
-#            print('Different amount of x and y images in the train folders')
-#            return
-#        else:
-#            self.data_len = len(self.msi_path_list)
-#        
-#    def __getitem__(self, index):
-#        img_x = torch.Tensor(np.load(self.msi_path_list[index])).permute(2,0,1) # Permute dims to have CxHxW
-#        img_y = torch.Tensor(np.load(self.hsi_path_list[index])).permute(2,0,1) # Permute dims to have CxHxW
-#        
-#        #print(f'X shape: {img_x.shape}')
-#        #print(f'X shape: {img_y.shape}')
-#        
-#        if self.transforms is not None:
-#            img_x = self.transforms(img_x)
-#            img_y = self.transforms(img_y)
-#        noise = self.noise[index]
-#        img_x = noise*self.percent_noise + x*(1-self.percent_noise
-#                                             )
-#        return img_x, img_y
-#
-#    def __len__(self):
-#        return self.data_len
-#
-#    #
+
 class GramLoss(Module):
-    def __init__(self, perceptual_model, style_loss = StyleLoss(), content_loss = MSELoss(reduction = 'mean'), device = 'cpu'):
+    def __init__(self, perceptual_model, style_loss = StyleLoss(), content_loss = MSELoss(reduction = 'mean'), contentLoss_coeff = 1,
+                styleLoss_coeff = 1e-3, block_coeff = [1, 1, 1], device = 'cpu'):
         super(GramLoss, self).__init__()
         self.perceptual_model = perceptual_model
         self.styleLoss = style_loss
@@ -389,6 +370,9 @@ class GramLoss(Module):
         self.contentLoss = content_loss
         self.contentLoss.to(device)
         self.device = device
+        self.contentLoss_coeff = contentLoss_coeff
+        self.styleLoss_coeff = styleLoss_coeff
+        self.block_coeff = block_coeff # es una lista de tres numeros que serán los coeficientes de los bloques
         
     def forward(self, img_recon, img_gt):
         perceptualFeat_gt = {}
@@ -426,9 +410,9 @@ class GramLoss(Module):
         # Calcular las losses
         style_loss = torch.zeros(1, requires_grad = True, device = self.device)
         #style_loss.to(device)
-        for block in blocks_list:
+        for block, coeff in zip(blocks_list, self.block_coeff):
             style((perceptualFeat_gt[block], perceptualFeat_reconstructed[block]))
-            style_loss = style_loss + style.loss # Pondera todas las capas en 1
+            style_loss = style_loss + coeff*style.loss # Pondera todas las capas por el correspondiente coeficiente asignado
         
         #print(style_loss.device)
         content_loss = self.contentLoss(img_recon, img_gt)
@@ -437,10 +421,8 @@ class GramLoss(Module):
         content_loss.to(self.device)
         #print(f'content_loss attached: {content_loss.requires_grad}')
         #print(f'style_loss attached: {style_loss.requires_grad}')
-        loss = 1*content_loss + 1e-3*style_loss
+        loss = self.contentLoss_coeff * content_loss + self.styleLoss_coeff * style_loss
         #print(loss)
         loss.to(self.device)
         #print(f'loss attached: {loss.requires_grad}')
         return loss
-    
-        
