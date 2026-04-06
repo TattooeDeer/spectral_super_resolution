@@ -1,0 +1,13 @@
+.venv/
+.git/
+*.pyc
+__pycache__/
+legacy/
+*.ipynb
+*.pdf
+*.png
+outputs/
+/tmp/
+.env
+.env.*
+!.env.example
