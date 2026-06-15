@@ -24,6 +24,9 @@ dependencies = [
     # Cloud storage (Cloudflare R2 via S3-compat)
     "boto3>=1.34.0",
 
+    # .env file support
+    "python-dotenv>=1.0.0",
+
     # Visualization
     "matplotlib>=3.7.0",
     "seaborn>=0.12.0",

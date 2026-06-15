@@ -1,10 +1,15 @@
 """FastAPI REST API for spectral super-resolution training and inference.
 
-Exposes two long-running operations as async background jobs:
-  POST /train        – train autoencoder or SR model
-  POST /reconstruct  – reconstruct hyperspectral images from multispectral patches
+Credentials and path resolution
+---------------------------------
+R2 credentials may be supplied in three ways (highest priority first):
+  1. Inline in the JSON request body  (``r2`` block)
+  2. Environment variables (R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY / R2_ENDPOINT_URL)
+  3. A .env file in the working directory (loaded automatically)
 
-Results (checkpoints, logs, plots) are uploaded automatically to Cloudflare R2.
+Any path field that starts with ``r2://`` is downloaded to a temporary
+local directory before the job starts, so models and dataset directories
+can live entirely in R2.
 
 Usage:
     uvicorn spectral_sr.api:app --host 0.0.0.0 --port 8000
@@ -24,11 +29,12 @@ import torch
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Security, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from .config import DataConfig, InferenceConfig, ModelConfig, TrainConfig
 from .inference import SpectralReconstructor
-from .storage import list_experiments, upload_directory, upload_json
+from .storage import R2Config, list_experiments, resolve_directory, resolve_path
+from .storage import upload_directory, upload_json
 from .train import Trainer
 
 logging.basicConfig(level=logging.INFO,
@@ -43,7 +49,9 @@ app = FastAPI(
     title="Spectral Super-Resolution API",
     description=(
         "REST API for training and running spectral reconstruction models "
-        "(Landsat-8 OLI → EO-1 Hyperion) with optional spectral-aware perceptual loss."
+        "(Landsat-8 OLI → EO-1 Hyperion) with optional spectral-aware perceptual loss.\n\n"
+        "**R2 paths:** Any path field accepts `r2://key` to reference an object "
+        "in your Cloudflare R2 bucket. It will be downloaded automatically before use."
     ),
     version="0.1.0",
 )
@@ -56,23 +64,23 @@ app.add_middleware(
 )
 
 # ---------------------------------------------------------------------------
-# Optional API-key auth (set API_KEY env var to enable)
+# Optional API-key auth – set API_KEY env var to enable
 # ---------------------------------------------------------------------------
 
-_API_KEY = os.getenv("API_KEY", "")
 _security = HTTPBearer(auto_error=False)
 
 
 def _check_api_key(credentials: Optional[HTTPAuthorizationCredentials] = Security(_security)):
-    if not _API_KEY:
+    api_key = os.getenv("API_KEY", "")
+    if not api_key:
         return  # auth disabled
-    if credentials is None or credentials.credentials != _API_KEY:
+    if credentials is None or credentials.credentials != api_key:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,
                             detail="Invalid or missing API key")
 
 
 # ---------------------------------------------------------------------------
-# In-memory job store (adequate for single-pod deployments)
+# In-memory job store
 # ---------------------------------------------------------------------------
 
 _jobs: Dict[str, Dict[str, Any]] = {}
@@ -80,7 +88,7 @@ _jobs: Dict[str, Dict[str, Any]] = {}
 
 def _new_job(kind: str, request_body: dict) -> dict:
     job_id = str(uuid.uuid4())
-    job = {
+    job: Dict[str, Any] = {
         "job_id": job_id,
         "kind": kind,
         "status": "queued",
@@ -101,21 +109,74 @@ def _update_job(job_id: str, **kwargs):
 
 
 # ---------------------------------------------------------------------------
+# Shared R2 credentials schema (reused by both request models)
+# ---------------------------------------------------------------------------
+
+class R2Credentials(BaseModel):
+    """
+    Optional per-request R2 credentials.
+
+    If omitted the server falls back to environment variables / .env file.
+    Never logged or stored in job history.
+    """
+    access_key_id: Optional[str] = Field(None, description="R2 Access Key ID")
+    secret_access_key: Optional[str] = Field(None, description="R2 Secret Access Key")
+    endpoint_url: Optional[str] = Field(None,
+        description="https://<account_id>.r2.cloudflarestorage.com")
+    bucket: Optional[str] = Field(None,
+        description="Bucket name (default: spectral-reconstruction-experiments)")
+
+    def to_r2config(self) -> R2Config:
+        """Build an R2Config, overlaying explicit fields on top of env vars."""
+        cfg = R2Config.from_env()
+        if self.access_key_id:
+            cfg.access_key_id = self.access_key_id
+        if self.secret_access_key:
+            cfg.secret_access_key = self.secret_access_key
+        if self.endpoint_url:
+            cfg.endpoint_url = self.endpoint_url
+        if self.bucket:
+            cfg.bucket = self.bucket
+        return cfg
+
+
+def _safe_request_dump(req: BaseModel) -> dict:
+    """Serialize request body but replace secret_access_key with a placeholder."""
+    d = req.model_dump()
+    if "r2" in d and d["r2"] and "secret_access_key" in (d["r2"] or {}):
+        if d["r2"]["secret_access_key"]:
+            d["r2"]["secret_access_key"] = "***"
+    return d
+
+
+# ---------------------------------------------------------------------------
 # Request / response schemas
 # ---------------------------------------------------------------------------
 
 class TrainRequest(BaseModel):
+    # --- R2 credentials (optional, fall back to env) ---
+    r2: Optional[R2Credentials] = Field(None,
+        description="R2 credentials (falls back to env vars / .env if omitted)")
+
+    # --- Training parameters ---
     mode: Literal["autoencoder", "sr"] = Field(...,
         description="autoencoder: Hyperion→Hyperion | sr: Landsat→Hyperion")
     model: Literal["hourglass", "koundinya"] = Field("hourglass")
     loss: Literal["mse", "perceptual"] = Field("mse")
-    ae_checkpoint: Optional[str] = Field(None,
-        description="Server-side path to pretrained AE (required for perceptual loss)")
 
-    hyperion_train_dir: str = Field(..., description="Server-side path to Hyperion train patches")
-    hyperion_val_dir: str = Field(..., description="Server-side path to Hyperion val patches")
-    landsat_train_dir: Optional[str] = Field(None)
-    landsat_val_dir: Optional[str] = Field(None)
+    # Accepts local path OR r2://key
+    ae_checkpoint: Optional[str] = Field(None,
+        description="Local path or r2://key of pretrained AE (required for perceptual loss)")
+
+    # Accepts local paths OR r2://prefix for entire directories
+    hyperion_train_dir: str = Field(...,
+        description="Local path or r2://prefix for Hyperion train patches")
+    hyperion_val_dir: str = Field(...,
+        description="Local path or r2://prefix for Hyperion val patches")
+    landsat_train_dir: Optional[str] = Field(None,
+        description="Local path or r2://prefix for Landsat train patches")
+    landsat_val_dir: Optional[str] = Field(None,
+        description="Local path or r2://prefix for Landsat val patches")
 
     encoder_channels: List[int] = Field([150, 100, 75],
         description="Encoder channel sizes [upper, middle, lower]")
@@ -129,22 +190,28 @@ class TrainRequest(BaseModel):
     seed: int = Field(42)
 
     experiment_name: str = Field("experiment",
-        description="Label used as the R2 folder prefix")
+        description="Label used as the R2 output folder prefix")
 
 
 class ReconstructRequest(BaseModel):
+    # --- R2 credentials (optional) ---
+    r2: Optional[R2Credentials] = Field(None)
+
+    # Accepts local path OR r2://key
     model: Literal["hourglass", "koundinya"] = Field("hourglass")
-    checkpoint: str = Field(..., description="Server-side path to trained model .pt file")
-    input_dir: str = Field(..., description="Server-side path to Landsat patches")
+    checkpoint: str = Field(...,
+        description="Local path or r2://key of trained model .pt file")
+    input_dir: str = Field(...,
+        description="Local path or r2://prefix of Landsat patches")
     encoder_channels: List[int] = Field([150, 100, 75])
     ground_truth_dir: Optional[str] = Field(None,
-        description="Server-side path to Hyperion patches (for metrics)")
+        description="Local path or r2://prefix of Hyperion patches (for metrics)")
 
-    # Optional wavelength metadata for spectral plots
-    hyperion_properties_path: Optional[str] = Field(None)
-    landsat_properties_path: Optional[str] = Field(None)
-    num_plot_samples: int = Field(5, ge=0, le=50,
-        description="Number of patches to visualize and upload")
+    hyperion_properties_path: Optional[str] = Field(None,
+        description="Local path or r2://key of Hyperion wavelength metadata .txt")
+    landsat_properties_path: Optional[str] = Field(None,
+        description="Local path or r2://key of Landsat wavelength metadata .txt")
+    num_plot_samples: int = Field(5, ge=0, le=50)
 
     experiment_name: str = Field("reconstruction")
 
@@ -162,22 +229,58 @@ class JobStatusResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Background worker functions
+# Background worker helpers
+# ---------------------------------------------------------------------------
+
+def _resolve_dir(path: Optional[str], cfg: R2Config,
+                 job_tmp: Path, label: str) -> Optional[str]:
+    """Resolve a local path or r2:// prefix to a usable local directory."""
+    if path is None:
+        return None
+    if not path.startswith("r2://"):
+        return path
+    key_prefix = path[len("r2://"):]
+    local = str(job_tmp / label)
+    logger.info("Downloading R2 directory r2://%s -> %s", key_prefix, local)
+    return resolve_directory(key_prefix, cfg=cfg, local_dir=local)
+
+
+def _resolve_file(path: Optional[str], cfg: R2Config,
+                  job_tmp: Path) -> Optional[str]:
+    """Resolve a local path or r2://key to a usable local file path."""
+    if path is None:
+        return None
+    if not path.startswith("r2://"):
+        return path
+    return resolve_path(path, cfg=cfg, tmp_dir=str(job_tmp))
+
+
+# ---------------------------------------------------------------------------
+# Background worker: training
 # ---------------------------------------------------------------------------
 
 def _run_training(job_id: str, req: TrainRequest):
-    """Execute training in background and upload results to R2."""
     try:
         _update_job(job_id, status="running")
 
+        cfg = req.r2.to_r2config() if req.r2 else R2Config.from_env()
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
         r2_prefix = f"{req.experiment_name}/{timestamp}"
-        output_dir = Path(f"/tmp/spectral_sr_jobs/{job_id}")
+        job_tmp = Path(f"/tmp/spectral_sr_jobs/{job_id}")
+        output_dir = job_tmp / "output"
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        # Upload request config immediately
         _update_job(job_id, r2_prefix=r2_prefix)
-        upload_json(req.model_dump(), f"{r2_prefix}/config.json")
+
+        # Upload sanitised config immediately (no secrets)
+        upload_json(_safe_request_dump(req), f"{r2_prefix}/config.json", cfg=cfg)
+
+        # Resolve r2:// paths to local directories/files
+        ae_local = _resolve_file(req.ae_checkpoint, cfg, job_tmp)
+        hyp_train = _resolve_dir(req.hyperion_train_dir, cfg, job_tmp, "hyperion_train")
+        hyp_val = _resolve_dir(req.hyperion_val_dir, cfg, job_tmp, "hyperion_val")
+        ls_train = _resolve_dir(req.landsat_train_dir, cfg, job_tmp, "landsat_train")
+        ls_val = _resolve_dir(req.landsat_val_dir, cfg, job_tmp, "landsat_val")
 
         model_config = ModelConfig(
             model_type=req.model,
@@ -186,17 +289,17 @@ def _run_training(job_id: str, req: TrainRequest):
             encoder_channels=req.encoder_channels,
         )
         data_config = DataConfig(
-            hyperion_train_dir=req.hyperion_train_dir,
-            hyperion_val_dir=req.hyperion_val_dir,
-            landsat_train_dir=req.landsat_train_dir,
-            landsat_val_dir=req.landsat_val_dir,
+            hyperion_train_dir=hyp_train,
+            hyperion_val_dir=hyp_val,
+            landsat_train_dir=ls_train,
+            landsat_val_dir=ls_val,
             batch_size=req.batch_size,
             num_workers=req.num_workers,
         )
         train_config = TrainConfig(
             mode=req.mode,
             loss_type=req.loss,
-            ae_checkpoint=req.ae_checkpoint,
+            ae_checkpoint=ae_local,
             epochs=req.epochs,
             lr=req.lr,
             content_loss_coeff=req.content_loss_coeff,
@@ -204,40 +307,48 @@ def _run_training(job_id: str, req: TrainRequest):
             block_coeff=req.block_coeff,
             output_dir=str(output_dir),
             checkpoint_every=1,
-            device=None,  # auto-detect
+            device=None,
             seed=req.seed,
         )
 
         trainer = Trainer(model_config, data_config, train_config)
         trainer.train()
 
-        # Upload all outputs to R2
-        keys = upload_directory(output_dir, r2_prefix)
+        keys = upload_directory(output_dir, r2_prefix, cfg=cfg)
+        _update_job(job_id, status="done", r2_keys=keys, metrics=trainer.history)
+        logger.info("Training job %s done. Uploaded %d files.", job_id, len(keys))
 
-        _update_job(job_id, status="done", r2_keys=keys,
-                    metrics=trainer.history)
-        logger.info("Job %s completed. Uploaded %d files to R2.", job_id, len(keys))
-
-    except Exception as exc:
-        logger.exception("Job %s failed", job_id)
+    except Exception:
+        logger.exception("Training job %s failed", job_id)
         _update_job(job_id, status="failed", error=traceback.format_exc())
 
 
+# ---------------------------------------------------------------------------
+# Background worker: reconstruction
+# ---------------------------------------------------------------------------
+
 def _run_reconstruction(job_id: str, req: ReconstructRequest):
-    """Execute reconstruction in background and upload results + plots to R2."""
     try:
         _update_job(job_id, status="running")
 
+        cfg = req.r2.to_r2config() if req.r2 else R2Config.from_env()
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
         r2_prefix = f"{req.experiment_name}/{timestamp}"
-        output_dir = Path(f"/tmp/spectral_sr_jobs/{job_id}")
-        patches_dir = output_dir / "patches"
-        plots_dir = output_dir / "plots"
-        patches_dir.mkdir(parents=True, exist_ok=True)
-        plots_dir.mkdir(parents=True, exist_ok=True)
+        job_tmp = Path(f"/tmp/spectral_sr_jobs/{job_id}")
+        patches_out = job_tmp / "patches"
+        plots_out = job_tmp / "plots"
+        patches_out.mkdir(parents=True, exist_ok=True)
+        plots_out.mkdir(parents=True, exist_ok=True)
 
         _update_job(job_id, r2_prefix=r2_prefix)
-        upload_json(req.model_dump(), f"{r2_prefix}/config.json")
+        upload_json(_safe_request_dump(req), f"{r2_prefix}/config.json", cfg=cfg)
+
+        # Resolve r2:// paths
+        ckpt_local = _resolve_file(req.checkpoint, cfg, job_tmp)
+        input_local = _resolve_dir(req.input_dir, cfg, job_tmp, "input")
+        gt_local = _resolve_dir(req.ground_truth_dir, cfg, job_tmp, "ground_truth")
+        hyp_props = _resolve_file(req.hyperion_properties_path, cfg, job_tmp)
+        ls_props = _resolve_file(req.landsat_properties_path, cfg, job_tmp)
 
         model_config = ModelConfig(
             model_type=req.model,
@@ -246,57 +357,51 @@ def _run_reconstruction(job_id: str, req: ReconstructRequest):
             encoder_channels=req.encoder_channels,
         )
         inference_config = InferenceConfig(
-            checkpoint=req.checkpoint,
-            input_dir=req.input_dir,
-            output_dir=str(patches_dir),
-            ground_truth_dir=req.ground_truth_dir,
+            checkpoint=ckpt_local,
+            input_dir=input_local,
+            output_dir=str(patches_out),
+            ground_truth_dir=gt_local,
             device=None,
         )
 
         reconstructor = SpectralReconstructor(model_config, inference_config)
         metrics = reconstructor.reconstruct()
 
-        # Generate spectral plots if wavelength metadata is provided
-        if req.num_plot_samples > 0 and req.hyperion_properties_path \
-                and req.landsat_properties_path and req.ground_truth_dir:
+        # Spectral plots (non-fatal if it fails)
+        if req.num_plot_samples > 0 and hyp_props and ls_props and gt_local:
             try:
                 from .visualization import (
                     generate_reconstruction_plots,
                     load_hyperion_wavelengths,
                     load_landsat_wavelengths,
                 )
-
                 device = "cuda" if torch.cuda.is_available() else "cpu"
-                wav_hyp = load_hyperion_wavelengths(req.hyperion_properties_path)
-                wav_ls = load_landsat_wavelengths(req.landsat_properties_path)
-
                 generate_reconstruction_plots(
                     model=reconstructor.model,
-                    landsat_dir=req.input_dir,
-                    hyperion_dir=req.ground_truth_dir,
-                    output_dir=plots_dir,
-                    wav_hyp=wav_hyp,
-                    wav_landsat=wav_ls,
+                    landsat_dir=input_local,
+                    hyperion_dir=gt_local,
+                    output_dir=plots_out,
+                    wav_hyp=load_hyperion_wavelengths(hyp_props),
+                    wav_landsat=load_landsat_wavelengths(ls_props),
                     num_samples=req.num_plot_samples,
                     device=device,
                 )
             except Exception:
                 logger.warning("Plot generation failed (non-fatal):\n%s", traceback.format_exc())
 
-        # Upload patches (npy) and plots (png) to R2
-        keys = upload_directory(patches_dir, f"{r2_prefix}/patches",
-                                extensions=(".npy",))
-        keys += upload_directory(plots_dir, f"{r2_prefix}/plots",
-                                 extensions=(".png",))
+        keys = upload_directory(patches_out, f"{r2_prefix}/patches",
+                                cfg=cfg, extensions=(".npy",))
+        keys += upload_directory(plots_out, f"{r2_prefix}/plots",
+                                 cfg=cfg, extensions=(".png",))
         if metrics:
-            upload_json(metrics, f"{r2_prefix}/metrics.json")
+            upload_json(metrics, f"{r2_prefix}/metrics.json", cfg=cfg)
             keys.append(f"{r2_prefix}/metrics.json")
 
         _update_job(job_id, status="done", r2_keys=keys, metrics=metrics)
-        logger.info("Job %s completed. Uploaded %d files to R2.", job_id, len(keys))
+        logger.info("Reconstruction job %s done. Uploaded %d files.", job_id, len(keys))
 
     except Exception:
-        logger.exception("Job %s failed", job_id)
+        logger.exception("Reconstruction job %s failed", job_id)
         _update_job(job_id, status="failed", error=traceback.format_exc())
 
 
@@ -306,36 +411,36 @@ def _run_reconstruction(job_id: str, req: ReconstructRequest):
 
 @app.get("/health", tags=["system"])
 def health():
-    """Return service status and device information."""
-    cuda_available = torch.cuda.is_available()
-    device_info = {}
-    if cuda_available:
-        device_info = {
+    """Service status and GPU device information."""
+    cuda = torch.cuda.is_available()
+    info: Dict[str, Any] = {"status": "ok", "cuda_available": cuda,
+                             "device": "cuda" if cuda else "cpu"}
+    if cuda:
+        info.update({
             "device_name": torch.cuda.get_device_name(0),
             "device_count": torch.cuda.device_count(),
             "memory_allocated_mb": round(torch.cuda.memory_allocated(0) / 1e6, 2),
             "memory_reserved_mb": round(torch.cuda.memory_reserved(0) / 1e6, 2),
-        }
-    return {
-        "status": "ok",
-        "cuda_available": cuda_available,
-        "device": "cuda" if cuda_available else "cpu",
-        **device_info,
-    }
+        })
+    return info
 
 
 @app.post("/train", response_model=JobStatusResponse, status_code=202, tags=["training"],
           dependencies=[Depends(_check_api_key)])
 def submit_training(req: TrainRequest, background_tasks: BackgroundTasks):
     """
-    Submit a training job (autoencoder or spectral reconstruction).
+    Submit a training job.
 
-    Returns immediately with a `job_id`. Poll `GET /jobs/{job_id}` for progress.
-    When complete, model checkpoints and logs are automatically uploaded to R2.
+    - `mode=autoencoder` trains the Hyperion→Hyperion denoising AE.
+    - `mode=sr` trains the Landsat→Hyperion SR model.
+    - `loss=perceptual` requires `ae_checkpoint` pointing to a trained AE.
+
+    All directory/file paths accept `r2://key` references.
+    Returns a `job_id` immediately; poll `GET /jobs/{job_id}` for status.
     """
-    job = _new_job("train", req.model_dump())
+    job = _new_job("train", _safe_request_dump(req))
     background_tasks.add_task(_run_training, job["job_id"], req)
-    logger.info("Queued training job %s (mode=%s, loss=%s)", job["job_id"], req.mode, req.loss)
+    logger.info("Queued training job %s (mode=%s loss=%s)", job["job_id"], req.mode, req.loss)
     return JobStatusResponse(**job)
 
 
@@ -345,10 +450,11 @@ def submit_reconstruction(req: ReconstructRequest, background_tasks: BackgroundT
     """
     Submit a reconstruction job.
 
-    Runs the trained SR model over all `.npy` patches in `input_dir`, saves
-    reconstructed patches and spectral plots, then uploads everything to R2.
+    Runs the trained SR model over all `.npy` patches in `input_dir`,
+    generates spectral plots, and uploads everything to R2.
+    All paths accept `r2://key` references.
     """
-    job = _new_job("reconstruct", req.model_dump())
+    job = _new_job("reconstruct", _safe_request_dump(req))
     background_tasks.add_task(_run_reconstruction, job["job_id"], req)
     logger.info("Queued reconstruction job %s", job["job_id"])
     return JobStatusResponse(**job)
@@ -357,7 +463,7 @@ def submit_reconstruction(req: ReconstructRequest, background_tasks: BackgroundT
 @app.get("/jobs", response_model=List[JobStatusResponse], tags=["jobs"],
          dependencies=[Depends(_check_api_key)])
 def list_jobs(kind: Optional[str] = None, status_filter: Optional[str] = None):
-    """List all jobs, optionally filtered by `kind` (train/reconstruct) or `status`."""
+    """List jobs, optionally filtered by `kind` (train/reconstruct) or `status`."""
     jobs = list(_jobs.values())
     if kind:
         jobs = [j for j in jobs if j["kind"] == kind]
@@ -369,42 +475,56 @@ def list_jobs(kind: Optional[str] = None, status_filter: Optional[str] = None):
 @app.get("/jobs/{job_id}", response_model=JobStatusResponse, tags=["jobs"],
          dependencies=[Depends(_check_api_key)])
 def get_job(job_id: str):
-    """Get the status and results for a specific job."""
+    """Get status and results for a specific job."""
     if job_id not in _jobs:
         raise HTTPException(status_code=404, detail=f"Job {job_id!r} not found")
     return JobStatusResponse(**_jobs[job_id])
 
 
 @app.get("/experiments", tags=["storage"], dependencies=[Depends(_check_api_key)])
-def get_experiments():
-    """List all top-level experiment folders saved in R2."""
+def get_experiments(
+    r2_access_key_id: Optional[str] = None,
+    r2_secret_access_key: Optional[str] = None,
+    r2_endpoint_url: Optional[str] = None,
+    r2_bucket: Optional[str] = None,
+):
+    """
+    List top-level experiment folders in R2.
+
+    Credentials can be supplied as query parameters or will fall back
+    to environment variables / .env file.
+    """
     try:
-        experiments = list_experiments()
-        return {"experiments": experiments, "count": len(experiments)}
+        cfg = R2Config.from_env()
+        if r2_access_key_id:
+            cfg.access_key_id = r2_access_key_id
+        if r2_secret_access_key:
+            cfg.secret_access_key = r2_secret_access_key
+        if r2_endpoint_url:
+            cfg.endpoint_url = r2_endpoint_url
+        if r2_bucket:
+            cfg.bucket = r2_bucket
+        experiments = list_experiments(cfg=cfg)
+        return {"experiments": experiments, "count": len(experiments),
+                "bucket": cfg.bucket}
     except Exception as exc:
         raise HTTPException(status_code=503,
-                            detail=f"Could not reach R2 storage: {exc}") from exc
+                            detail=f"Could not reach R2: {exc}") from exc
 
 
 # ---------------------------------------------------------------------------
-# Entrypoint helper (used by the `spectral-sr-api` console script)
+# Server entrypoint
 # ---------------------------------------------------------------------------
 
 def start_server():
-    """Start the API server with uvicorn (called via CLI)."""
+    """Start uvicorn server (called via `spectral-sr-api` console script)."""
     import uvicorn
-
-    host = os.getenv("HOST", "0.0.0.0")
-    port = int(os.getenv("PORT", "8000"))
-    workers = int(os.getenv("WORKERS", "1"))
-    log_level = os.getenv("LOG_LEVEL", "info")
-
     uvicorn.run(
         "spectral_sr.api:app",
-        host=host,
-        port=port,
-        workers=workers,
-        log_level=log_level,
+        host=os.getenv("HOST", "0.0.0.0"),
+        port=int(os.getenv("PORT", "8000")),
+        workers=int(os.getenv("WORKERS", "1")),
+        log_level=os.getenv("LOG_LEVEL", "info"),
     )
 
 
