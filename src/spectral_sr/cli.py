@@ -4,7 +4,7 @@ R2 integration
 --------------
 All directory / file path arguments accept either:
   - A local filesystem path          e.g.  /data/hyperion_train_npy
-  - An R2 object reference           e.g.  r2://data/hyperion_train_npy
+  - An R2 object reference           e.g.  r2://hyperion_train_npy
 
 When an ``r2://`` path is given the object (or directory prefix) is
 downloaded to a temporary local directory before the command runs.
@@ -236,18 +236,18 @@ Examples (local paths):
     --encoder-channels 150,100,75 --epochs 5 --output-dir outputs/ae
 
   spectral-sr train --mode sr --loss perceptual \\
-    --ae-checkpoint      r2://models/AEHG_150_100_75.pt \\
-    --hyperion-train-dir r2://data/hyperion_train_npy \\
-    --hyperion-val-dir   r2://data/hyperion_val_npy   \\
-    --landsat-train-dir  r2://data/landsat_train_npy  \\
-    --landsat-val-dir    r2://data/landsat_val_npy    \\
+    --ae-checkpoint      r2://Models/AEHG_150_100_75.pt \\
+    --hyperion-train-dir r2://hyperion_train_npy \\
+    --hyperion-val-dir   r2://hyperion_val_npy   \\
+    --landsat-train-dir  r2://landsat_train_npy  \\
+    --landsat-val-dir    r2://landsat_val_npy    \\
     --encoder-channels 150,100,75 --epochs 5          \\
     --output-dir outputs/sr --r2-upload               \\
     --r2-experiment-name my_experiment
 
   spectral-sr reconstruct --model hourglass \\
-    --checkpoint  r2://models/hg_SR_150_100_75.pt \\
-    --input-dir   r2://data/landsat_test_npy      \\
+    --checkpoint  r2://Models/hg_SR_150_100_75.pt \\
+    --input-dir   r2://landsat_test_npy      \\
     --output-dir  outputs/reconstructed           \\
     --r2-upload --r2-experiment-name my_reconstruction
         """,
