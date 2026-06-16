@@ -7,3 +7,4 @@ build/
 .env
 outputs/
 /tmp/spectral_sr_jobs/
+.DS_Store
