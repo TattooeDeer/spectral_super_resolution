@@ -49,3 +49,9 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/spectral_sr"]
+
+[tool.uv]
+package = true
+required-environments = [
+    "sys_platform == 'linux' and platform_machine == 'x86_64'",
+]
