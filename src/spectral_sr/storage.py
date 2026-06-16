@@ -14,7 +14,7 @@ Use ``resolve_path()`` to transparently download it to a local temp file
 before passing it to PyTorch / numpy loaders.
 
 Example:
-    local = resolve_path("r2://models/AEHG_150_100_75.pt", cfg)
+    local = resolve_path("r2://Models/AEHG_150_100_75.pt", cfg)
     model.load_state_dict(torch.load(local))
 """
 
@@ -54,7 +54,7 @@ class R2Config:
     access_key_id: str = field(default_factory=lambda: os.environ.get("R2_ACCESS_KEY_ID", ""))
     secret_access_key: str = field(default_factory=lambda: os.environ.get("R2_SECRET_ACCESS_KEY", ""))
     endpoint_url: str = field(default_factory=lambda: os.environ.get("R2_ENDPOINT_URL", ""))
-    bucket: str = field(default_factory=lambda: os.environ.get("R2_BUCKET_NAME", "spectral-reconstruction-experiments"))
+    bucket: str = field(default_factory=lambda: os.environ.get("R2_BUCKET_NAME", "spectral-reconstruction-data-ena"))
 
     def validate(self):
         """Raise EnvironmentError if any required field is missing."""
@@ -148,7 +148,7 @@ def resolve_directory(r2_prefix: str, cfg: Optional[R2Config] = None,
     SpectralDataset_npy at a local folder.
 
     Args:
-        r2_prefix: Key prefix inside the bucket (e.g. "data/hyperion_train_npy")
+        r2_prefix: Key prefix inside the bucket (e.g. "hyperion_train_npy")
         cfg:       R2Config (falls back to env vars)
         local_dir: Where to put the files (defaults to a new temp dir)
 

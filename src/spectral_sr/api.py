@@ -32,6 +32,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field, model_validator
 
 from .config import DataConfig, InferenceConfig, ModelConfig, TrainConfig
+from .version import __version__
 from .inference import SpectralReconstructor
 from .storage import R2Config, list_experiments, resolve_directory, resolve_path
 from .storage import upload_directory, upload_json
@@ -53,7 +54,7 @@ app = FastAPI(
         "**R2 paths:** Any path field accepts `r2://key` to reference an object "
         "in your Cloudflare R2 bucket. It will be downloaded automatically before use."
     ),
-    version="0.1.0",
+    version=__version__,
 )
 
 app.add_middleware(
@@ -124,7 +125,7 @@ class R2Credentials(BaseModel):
     endpoint_url: Optional[str] = Field(None,
         description="https://<account_id>.r2.cloudflarestorage.com")
     bucket: Optional[str] = Field(None,
-        description="Bucket name (default: spectral-reconstruction-experiments)")
+        description="Bucket name (default: spectral-reconstruction-data-ena)")
 
     def to_r2config(self) -> R2Config:
         """Build an R2Config, overlaying explicit fields on top of env vars."""
@@ -413,7 +414,8 @@ def _run_reconstruction(job_id: str, req: ReconstructRequest):
 def health():
     """Service status and GPU device information."""
     cuda = torch.cuda.is_available()
-    info: Dict[str, Any] = {"status": "ok", "cuda_available": cuda,
+    info: Dict[str, Any] = {"status": "ok", "version": __version__,
+                             "cuda_available": cuda,
                              "device": "cuda" if cuda else "cpu"}
     if cuda:
         info.update({
