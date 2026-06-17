@@ -4,7 +4,7 @@ Credentials and path resolution
 ---------------------------------
 R2 credentials may be supplied in three ways (highest priority first):
   1. Inline in the JSON request body  (``r2`` block)
-  2. Environment variables (R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY / R2_ENDPOINT_URL)
+  2. Environment variables (SPECTRAL_RECONSTRUCTION_R2_ACCESS_KEY_ID / …)
   3. A .env file in the working directory (loaded automatically)
 
 Any path field that starts with ``r2://`` is downloaded to a temporary
@@ -18,7 +18,6 @@ Usage:
 from __future__ import annotations
 
 import logging
-import os
 import traceback
 import uuid
 from datetime import datetime, timezone
@@ -32,6 +31,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field, model_validator
 
 from .config import DataConfig, InferenceConfig, ModelConfig, TrainConfig
+from . import env
 from .version import __version__
 from .inference import SpectralReconstructor
 from .storage import R2Config, list_experiments, resolve_directory, resolve_path
@@ -65,14 +65,14 @@ app.add_middleware(
 )
 
 # ---------------------------------------------------------------------------
-# Optional API-key auth – set API_KEY env var to enable
+# Optional API-key auth – set SPECTRAL_RECONSTRUCTION_API_KEY env var to enable
 # ---------------------------------------------------------------------------
 
 _security = HTTPBearer(auto_error=False)
 
 
 def _check_api_key(credentials: Optional[HTTPAuthorizationCredentials] = Security(_security)):
-    api_key = os.getenv("API_KEY", "")
+    api_key = env.getenv(env.API_KEY)
     if not api_key:
         return  # auth disabled
     if credentials is None or credentials.credentials != api_key:
@@ -265,6 +265,7 @@ def _run_training(job_id: str, req: TrainRequest):
         _update_job(job_id, status="running")
 
         cfg = req.r2.to_r2config() if req.r2 else R2Config.from_env()
+        upload_cfg = cfg.for_experiments()
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
         r2_prefix = f"{req.experiment_name}/{timestamp}"
         job_tmp = Path(f"/tmp/spectral_sr_jobs/{job_id}")
@@ -274,7 +275,7 @@ def _run_training(job_id: str, req: TrainRequest):
         _update_job(job_id, r2_prefix=r2_prefix)
 
         # Upload sanitised config immediately (no secrets)
-        upload_json(_safe_request_dump(req), f"{r2_prefix}/config.json", cfg=cfg)
+        upload_json(_safe_request_dump(req), f"{r2_prefix}/config.json", cfg=upload_cfg)
 
         # Resolve r2:// paths to local directories/files
         ae_local = _resolve_file(req.ae_checkpoint, cfg, job_tmp)
@@ -315,7 +316,7 @@ def _run_training(job_id: str, req: TrainRequest):
         trainer = Trainer(model_config, data_config, train_config)
         trainer.train()
 
-        keys = upload_directory(output_dir, r2_prefix, cfg=cfg)
+        keys = upload_directory(output_dir, r2_prefix, cfg=upload_cfg)
         _update_job(job_id, status="done", r2_keys=keys, metrics=trainer.history)
         logger.info("Training job %s done. Uploaded %d files.", job_id, len(keys))
 
@@ -333,6 +334,7 @@ def _run_reconstruction(job_id: str, req: ReconstructRequest):
         _update_job(job_id, status="running")
 
         cfg = req.r2.to_r2config() if req.r2 else R2Config.from_env()
+        upload_cfg = cfg.for_experiments()
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
         r2_prefix = f"{req.experiment_name}/{timestamp}"
         job_tmp = Path(f"/tmp/spectral_sr_jobs/{job_id}")
@@ -342,7 +344,7 @@ def _run_reconstruction(job_id: str, req: ReconstructRequest):
         plots_out.mkdir(parents=True, exist_ok=True)
 
         _update_job(job_id, r2_prefix=r2_prefix)
-        upload_json(_safe_request_dump(req), f"{r2_prefix}/config.json", cfg=cfg)
+        upload_json(_safe_request_dump(req), f"{r2_prefix}/config.json", cfg=upload_cfg)
 
         # Resolve r2:// paths
         ckpt_local = _resolve_file(req.checkpoint, cfg, job_tmp)
@@ -391,11 +393,11 @@ def _run_reconstruction(job_id: str, req: ReconstructRequest):
                 logger.warning("Plot generation failed (non-fatal):\n%s", traceback.format_exc())
 
         keys = upload_directory(patches_out, f"{r2_prefix}/patches",
-                                cfg=cfg, extensions=(".npy",))
+                                cfg=upload_cfg, extensions=(".npy",))
         keys += upload_directory(plots_out, f"{r2_prefix}/plots",
-                                 cfg=cfg, extensions=(".png",))
+                                 cfg=upload_cfg, extensions=(".png",))
         if metrics:
-            upload_json(metrics, f"{r2_prefix}/metrics.json", cfg=cfg)
+            upload_json(metrics, f"{r2_prefix}/metrics.json", cfg=upload_cfg)
             keys.append(f"{r2_prefix}/metrics.json")
 
         _update_job(job_id, status="done", r2_keys=keys, metrics=metrics)
@@ -488,10 +490,10 @@ def get_experiments(
     r2_access_key_id: Optional[str] = None,
     r2_secret_access_key: Optional[str] = None,
     r2_endpoint_url: Optional[str] = None,
-    r2_bucket: Optional[str] = None,
+    r2_experiments_bucket: Optional[str] = None,
 ):
     """
-    List top-level experiment folders in R2.
+    List top-level experiment folders in the experiments R2 bucket.
 
     Credentials can be supplied as query parameters or will fall back
     to environment variables / .env file.
@@ -504,11 +506,11 @@ def get_experiments(
             cfg.secret_access_key = r2_secret_access_key
         if r2_endpoint_url:
             cfg.endpoint_url = r2_endpoint_url
-        if r2_bucket:
-            cfg.bucket = r2_bucket
+        if r2_experiments_bucket:
+            cfg.experiments_bucket = r2_experiments_bucket
         experiments = list_experiments(cfg=cfg)
         return {"experiments": experiments, "count": len(experiments),
-                "bucket": cfg.bucket}
+                "bucket": cfg.experiments_bucket}
     except Exception as exc:
         raise HTTPException(status_code=503,
                             detail=f"Could not reach R2: {exc}") from exc
@@ -523,10 +525,10 @@ def start_server():
     import uvicorn
     uvicorn.run(
         "spectral_sr.api:app",
-        host=os.getenv("HOST", "0.0.0.0"),
-        port=int(os.getenv("PORT", "8000")),
-        workers=int(os.getenv("WORKERS", "1")),
-        log_level=os.getenv("LOG_LEVEL", "info"),
+        host=env.getenv(env.HOST, "0.0.0.0"),
+        port=int(env.getenv(env.PORT, "8000")),
+        workers=int(env.getenv(env.WORKERS, "1")),
+        log_level=env.getenv(env.LOG_LEVEL, "info"),
     )
 
 
