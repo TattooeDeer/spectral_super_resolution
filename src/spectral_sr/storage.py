@@ -2,7 +2,7 @@
 
 Credentials are resolved in this priority order:
   1. Explicitly passed R2Config object (from API payload or CLI flags)
-  2. Environment variables (R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, …)
+  2. Environment variables (SPECTRAL_RECONSTRUCTION_R2_ACCESS_KEY_ID, …)
   3. .env file in the current working directory (loaded automatically at import)
 
 No credentials are ever hard-coded here.
@@ -14,7 +14,7 @@ Use ``resolve_path()`` to transparently download it to a local temp file
 before passing it to PyTorch / numpy loaders.
 
 Example:
-    local = resolve_path("r2://models/AEHG_150_100_75.pt", cfg)
+    local = resolve_path("r2://Models/AEHG_150_100_75.pt", cfg)
     model.load_state_dict(torch.load(local))
 """
 
@@ -23,11 +23,12 @@ from __future__ import annotations
 import io
 import json
 import logging
-import os
 import tempfile
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import List, Optional
+
+from . import env
 
 logger = logging.getLogger(__name__)
 
@@ -51,17 +52,28 @@ class R2Config:
     Fields default to the corresponding environment variables so callers
     only need to pass what differs from the environment.
     """
-    access_key_id: str = field(default_factory=lambda: os.environ.get("R2_ACCESS_KEY_ID", ""))
-    secret_access_key: str = field(default_factory=lambda: os.environ.get("R2_SECRET_ACCESS_KEY", ""))
-    endpoint_url: str = field(default_factory=lambda: os.environ.get("R2_ENDPOINT_URL", ""))
-    bucket: str = field(default_factory=lambda: os.environ.get("R2_BUCKET_NAME", "spectral-reconstruction-experiments"))
+    access_key_id: str = field(default_factory=lambda: env.getenv(env.R2_ACCESS_KEY_ID))
+    secret_access_key: str = field(default_factory=lambda: env.getenv(env.R2_SECRET_ACCESS_KEY))
+    endpoint_url: str = field(default_factory=lambda: env.getenv(env.R2_ENDPOINT_URL))
+    bucket: str = field(
+        default_factory=lambda: env.getenv(env.R2_BUCKET_NAME, "spectral-reconstruction-data-ena")
+    )
+    experiments_bucket: str = field(
+        default_factory=lambda: env.getenv(
+            env.R2_BUCKET_NAME_EXPERIMENTS, "spectral-reconstruction-experiments"
+        )
+    )
+
+    def for_experiments(self) -> "R2Config":
+        """Return a copy targeting the experiments results bucket."""
+        return replace(self, bucket=self.experiments_bucket)
 
     def validate(self):
         """Raise EnvironmentError if any required field is missing."""
         missing = [f for f, v in [
-            ("R2_ACCESS_KEY_ID / access_key_id", self.access_key_id),
-            ("R2_SECRET_ACCESS_KEY / secret_access_key", self.secret_access_key),
-            ("R2_ENDPOINT_URL / endpoint_url", self.endpoint_url),
+            (f"{env.R2_ACCESS_KEY_ID} / access_key_id", self.access_key_id),
+            (f"{env.R2_SECRET_ACCESS_KEY} / secret_access_key", self.secret_access_key),
+            (f"{env.R2_ENDPOINT_URL} / endpoint_url", self.endpoint_url),
         ] if not v]
         if missing:
             raise EnvironmentError(
@@ -148,7 +160,7 @@ def resolve_directory(r2_prefix: str, cfg: Optional[R2Config] = None,
     SpectralDataset_npy at a local folder.
 
     Args:
-        r2_prefix: Key prefix inside the bucket (e.g. "data/hyperion_train_npy")
+        r2_prefix: Key prefix inside the bucket (e.g. "hyperion_train_npy")
         cfg:       R2Config (falls back to env vars)
         local_dir: Where to put the files (defaults to a new temp dir)
 
@@ -257,9 +269,11 @@ def upload_directory(local_dir: Path, r2_prefix: str,
 # ---------------------------------------------------------------------------
 
 def list_experiments(cfg: Optional[R2Config] = None) -> List[str]:
-    """Return top-level experiment folder names in the bucket."""
+    """Return top-level experiment folder names in the experiments bucket."""
     cfg = cfg or R2Config.from_env()
-    response = cfg.client().list_objects_v2(Bucket=cfg.bucket, Delimiter="/")
+    response = cfg.client().list_objects_v2(
+        Bucket=cfg.experiments_bucket, Delimiter="/"
+    )
     return [cp["Prefix"].rstrip("/") for cp in response.get("CommonPrefixes", [])]
 
 

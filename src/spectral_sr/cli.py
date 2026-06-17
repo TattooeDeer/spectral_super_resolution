@@ -4,14 +4,14 @@ R2 integration
 --------------
 All directory / file path arguments accept either:
   - A local filesystem path          e.g.  /data/hyperion_train_npy
-  - An R2 object reference           e.g.  r2://data/hyperion_train_npy
+  - An R2 object reference           e.g.  r2://hyperion_train_npy
 
 When an ``r2://`` path is given the object (or directory prefix) is
 downloaded to a temporary local directory before the command runs.
 
 R2 credentials are resolved in this order:
   1. CLI flags  --r2-access-key-id / --r2-secret-access-key / --r2-endpoint-url
-  2. Environment variables  R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY / R2_ENDPOINT_URL
+  2. Environment variables  SPECTRAL_RECONSTRUCTION_R2_ACCESS_KEY_ID / …
   3. .env file in the current working directory
 
 Upload
@@ -27,6 +27,7 @@ import tempfile
 from pathlib import Path
 from typing import List, Optional
 
+from . import env
 from .storage import R2Config, resolve_directory, resolve_path, upload_directory
 
 
@@ -107,13 +108,13 @@ def _add_r2_args(parser: argparse.ArgumentParser):
         "Override the R2 credentials from .env / environment variables."
     )
     r2.add_argument("--r2-access-key-id", metavar="KEY",
-                    help="R2 Access Key ID (overrides R2_ACCESS_KEY_ID env var)")
+                    help=f"R2 Access Key ID (overrides {env.R2_ACCESS_KEY_ID} env var)")
     r2.add_argument("--r2-secret-access-key", metavar="SECRET",
-                    help="R2 Secret Access Key (overrides R2_SECRET_ACCESS_KEY env var)")
+                    help=f"R2 Secret Access Key (overrides {env.R2_SECRET_ACCESS_KEY} env var)")
     r2.add_argument("--r2-endpoint-url", metavar="URL",
-                    help="R2 endpoint URL (overrides R2_ENDPOINT_URL env var)")
+                    help=f"R2 endpoint URL (overrides {env.R2_ENDPOINT_URL} env var)")
     r2.add_argument("--r2-bucket", metavar="BUCKET",
-                    help="R2 bucket name (overrides R2_BUCKET_NAME env var)")
+                    help=f"R2 data bucket name (overrides {env.R2_BUCKET_NAME} env var)")
 
     up = parser.add_argument_group("R2 upload", "Upload outputs to R2 after completion.")
     up.add_argument("--r2-upload", action="store_true",
@@ -174,9 +175,10 @@ def train_command(args):
         trainer.train()
 
     if args.r2_upload:
-        print(f"\n[R2] Uploading outputs to r2://{args.r2_experiment_name}/")
-        cfg.validate()
-        keys = upload_directory(Path(args.output_dir), args.r2_experiment_name, cfg=cfg)
+        upload_cfg = cfg.for_experiments()
+        print(f"\n[R2] Uploading outputs to r2://{upload_cfg.bucket}/{args.r2_experiment_name}/")
+        upload_cfg.validate()
+        keys = upload_directory(Path(args.output_dir), args.r2_experiment_name, cfg=upload_cfg)
         print(f"[R2] Uploaded {len(keys)} files.")
 
 
@@ -214,9 +216,10 @@ def reconstruct_command(args):
         reconstruct_from_config(model_config, inference_config)
 
     if args.r2_upload:
-        print(f"\n[R2] Uploading outputs to r2://{args.r2_experiment_name}/")
-        cfg.validate()
-        keys = upload_directory(Path(args.output_dir), args.r2_experiment_name, cfg=cfg)
+        upload_cfg = cfg.for_experiments()
+        print(f"\n[R2] Uploading outputs to r2://{upload_cfg.bucket}/{args.r2_experiment_name}/")
+        upload_cfg.validate()
+        keys = upload_directory(Path(args.output_dir), args.r2_experiment_name, cfg=upload_cfg)
         print(f"[R2] Uploaded {len(keys)} files.")
 
 
@@ -236,18 +239,18 @@ Examples (local paths):
     --encoder-channels 150,100,75 --epochs 5 --output-dir outputs/ae
 
   spectral-sr train --mode sr --loss perceptual \\
-    --ae-checkpoint      r2://models/AEHG_150_100_75.pt \\
-    --hyperion-train-dir r2://data/hyperion_train_npy \\
-    --hyperion-val-dir   r2://data/hyperion_val_npy   \\
-    --landsat-train-dir  r2://data/landsat_train_npy  \\
-    --landsat-val-dir    r2://data/landsat_val_npy    \\
+    --ae-checkpoint      r2://Models/AEHG_150_100_75.pt \\
+    --hyperion-train-dir r2://hyperion_train_npy \\
+    --hyperion-val-dir   r2://hyperion_val_npy   \\
+    --landsat-train-dir  r2://landsat_train_npy  \\
+    --landsat-val-dir    r2://landsat_val_npy    \\
     --encoder-channels 150,100,75 --epochs 5          \\
     --output-dir outputs/sr --r2-upload               \\
     --r2-experiment-name my_experiment
 
   spectral-sr reconstruct --model hourglass \\
-    --checkpoint  r2://models/hg_SR_150_100_75.pt \\
-    --input-dir   r2://data/landsat_test_npy      \\
+    --checkpoint  r2://Models/hg_SR_150_100_75.pt \\
+    --input-dir   r2://landsat_test_npy      \\
     --output-dir  outputs/reconstructed           \\
     --r2-upload --r2-experiment-name my_reconstruction
         """,
