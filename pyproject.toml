@@ -1,6 +1,6 @@
 [project]
 name = "spectral-sr"
-version = "0.1.0"
+version = "1.0.0"
 description = "Spectral Super-Resolution for satellite imagery using deep learning with perceptual loss"
 authors = [
     {name = "Ignacio Loayza Campos"}
