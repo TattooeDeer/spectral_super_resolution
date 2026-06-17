@@ -30,6 +30,18 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # PyTorch images + CUDA wheels exceed default runner disk without cleanup.
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: true
+
       # Semver from git tag (v1.2.3 → 1.2.3); branch builds get dev-<sha>
       - name: Resolve app version
         id: app_version

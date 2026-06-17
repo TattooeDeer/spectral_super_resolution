@@ -1,36 +1,7 @@
-# ─────────────────────────────────────────────────────────────────────────────
-# Stage 1 – builder
-# Install UV and resolve dependencies from the frozen lockfile into a venv.
-# ─────────────────────────────────────────────────────────────────────────────
-FROM pytorch/pytorch:2.2.2-cuda12.1-cudnn8-runtime AS builder
-
-# Install system build deps
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        curl \
-        git \
-    && rm -rf /var/lib/apt/lists/*
-
-# Install UV
-RUN curl -LsSf https://astral.sh/uv/install.sh | sh
-ENV PATH="/root/.local/bin:$PATH"
-
-WORKDIR /app
-
-# Copy dependency manifests first (layer-cache friendly)
-COPY pyproject.toml uv.lock README.md ./
-COPY src/ src/
-
-# Create venv and install locked dependencies (including this package, editable)
-RUN uv venv /opt/venv --python python3
-ENV UV_PROJECT_ENVIRONMENT=/opt/venv
-ENV VIRTUAL_ENV=/opt/venv
-ENV PATH="/opt/venv/bin:$PATH"
-RUN uv sync --frozen
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Stage 2 – runtime
-# ─────────────────────────────────────────────────────────────────────────────
-FROM pytorch/pytorch:2.2.2-cuda12.1-cudnn8-runtime AS runtime
+# Single-stage image: pytorch base already ships torch/CUDA in conda.
+# uv sync skips those packages to avoid ~3GB duplicate installs that exhaust
+# GitHub Actions runner disk during multi-stage COPY.
+FROM pytorch/pytorch:2.2.2-cuda12.1-cudnn8-runtime
 
 # Bake release version into the image (override: docker build --build-arg APP_VERSION=1.2.3)
 ARG APP_VERSION=dev
@@ -51,15 +22,47 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libxext6 \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy the populated venv from builder
-COPY --from=builder /opt/venv /opt/venv
+# Install UV
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+ENV PATH="/root/.local/bin:$PATH"
+ENV UV_LINK_MODE=copy
+
+WORKDIR /app
+
+# Copy dependency manifests first (layer-cache friendly)
+COPY pyproject.toml uv.lock README.md ./
+COPY src/ src/
+
+# Use conda site-packages for torch; install only app + non-torch deps into venv.
+RUN uv venv /opt/venv --python python3 --system-site-packages
+ENV UV_PROJECT_ENVIRONMENT=/opt/venv
 ENV VIRTUAL_ENV=/opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 
-# Copy source at the same path as the builder so the editable install resolves
-WORKDIR /app
-COPY --chown=appuser:appuser pyproject.toml uv.lock ./
-COPY --chown=appuser:appuser src/ src/
+# Packages already provided by pytorch/pytorch (see uv.lock for the full CUDA stack).
+RUN set -eux; \
+    EXCLUDE_PKGS="torch triton cuda-bindings cuda-pathfinder cuda-toolkit \
+        nvidia-cublas nvidia-cublas-cu12 \
+        nvidia-cuda-cupti nvidia-cuda-cupti-cu12 \
+        nvidia-cuda-nvrtc nvidia-cuda-nvrtc-cu12 \
+        nvidia-cuda-runtime nvidia-cuda-runtime-cu12 \
+        nvidia-cudnn-cu12 nvidia-cudnn-cu13 \
+        nvidia-cufft nvidia-cufft-cu12 \
+        nvidia-cufile nvidia-cufile-cu12 \
+        nvidia-curand nvidia-curand-cu12 \
+        nvidia-cusolver nvidia-cusolver-cu12 \
+        nvidia-cusparse nvidia-cusparse-cu12 \
+        nvidia-cusparselt-cu12 nvidia-cusparselt-cu13 \
+        nvidia-nccl-cu12 nvidia-nccl-cu13 \
+        nvidia-nvjitlink nvidia-nvjitlink-cu12 \
+        nvidia-nvshmem-cu13 \
+        nvidia-nvtx nvidia-nvtx-cu12"; \
+    ARGS=""; \
+    for pkg in ${EXCLUDE_PKGS}; do ARGS="${ARGS} --no-install-package ${pkg}"; done; \
+    uv sync --frozen ${ARGS}; \
+    rm -rf /root/.cache/uv
+
+RUN chown -R appuser:appuser /opt/venv /app
 
 # Matplotlib headless backend
 ENV MPLBACKEND=Agg
