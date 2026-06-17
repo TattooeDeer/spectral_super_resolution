@@ -34,7 +34,7 @@ FROM pytorch/pytorch:2.2.2-cuda12.1-cudnn8-runtime AS runtime
 
 # Bake release version into the image (override: docker build --build-arg APP_VERSION=1.2.3)
 ARG APP_VERSION=dev
-ENV SPECTRAL_SR_VERSION=${APP_VERSION}
+ENV SPECTRAL_RECONSTRUCTION_SPECTRAL_SR_VERSION=${APP_VERSION}
 LABEL org.opencontainers.image.version="${APP_VERSION}"
 
 # Non-root user for security (RunPod typically runs as root, adjust if needed)
@@ -65,17 +65,18 @@ COPY --chown=appuser:appuser src/ src/
 ENV MPLBACKEND=Agg
 
 # Default env vars (override at runtime via --env or RunPod secrets)
-ENV HOST=0.0.0.0
-ENV PORT=8000
-ENV WORKERS=1
-ENV LOG_LEVEL=info
+ENV SPECTRAL_RECONSTRUCTION_HOST=0.0.0.0
+ENV SPECTRAL_RECONSTRUCTION_PORT=8000
+ENV SPECTRAL_RECONSTRUCTION_WORKERS=1
+ENV SPECTRAL_RECONSTRUCTION_LOG_LEVEL=info
 
 # R2 credentials – MUST be supplied at runtime (see .env.example / RUNPOD_SETUP.md)
-# ENV R2_ACCESS_KEY_ID=
-# ENV R2_SECRET_ACCESS_KEY=
-# ENV R2_ENDPOINT_URL=
-# ENV R2_BUCKET_NAME=
-# ENV API_KEY=
+# ENV SPECTRAL_RECONSTRUCTION_R2_ACCESS_KEY_ID=
+# ENV SPECTRAL_RECONSTRUCTION_R2_SECRET_ACCESS_KEY=
+# ENV SPECTRAL_RECONSTRUCTION_R2_ENDPOINT_URL=
+# ENV SPECTRAL_RECONSTRUCTION_R2_BUCKET_NAME=
+# ENV SPECTRAL_RECONSTRUCTION_R2_BUCKET_NAME_EXPERIMENTS=
+# ENV SPECTRAL_RECONSTRUCTION_API_KEY=
 
 # Data volume mount point (mount your RunPod network volume here)
 VOLUME ["/data"]
@@ -84,7 +85,7 @@ EXPOSE 8000
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
-    CMD curl -f http://localhost:${PORT}/health || exit 1
+    CMD curl -f http://localhost:${SPECTRAL_RECONSTRUCTION_PORT}/health || exit 1
 
 USER appuser
 

@@ -4,6 +4,7 @@ Complete walkthrough for deploying the Spectral SR API on a RunPod GPU pod,
 with all data and model artefacts stored in Cloudflare R2.
 
 The project data lives in the **`spectral-reconstruction-data-ena`** bucket.
+Experiment outputs are written to **`spectral-reconstruction-experiments`**.
 Objects sit at the **bucket root** (there is no `data/` prefix).
 
 ---
@@ -57,12 +58,12 @@ If you are setting up a fresh Cloudflare account instead:
 1. Inside R2, click **Manage R2 API Tokens** → **Create API token**
 2. Set permissions:
    - **Permissions:** Object Read & Write
-   - **Specify bucket(s):** `spectral-reconstruction-data-ena`
+   - **Specify bucket(s):** `spectral-reconstruction-data-ena`, `spectral-reconstruction-experiments`
 3. Click **Create API token**
 4. **Save the token values immediately** – you cannot view the secret again:
    ```
-   Access Key ID:     <R2_ACCESS_KEY_ID>
-   Secret Access Key: <R2_SECRET_ACCESS_KEY>
+   Access Key ID:     <SPECTRAL_RECONSTRUCTION_R2_ACCESS_KEY_ID>
+   Secret Access Key: <SPECTRAL_RECONSTRUCTION_R2_SECRET_ACCESS_KEY>
    ```
 
 ### 2c. Note your endpoint URL
@@ -97,7 +98,9 @@ spectral-reconstruction-data-ena/
   ALI_envi_ascii.txt         ← band response metadata (Hyperion / ALI)
   datasets.py                ← original dataset loader (reference)
   *.ipynb                    ← preprocessing / experiment notebooks
-  <experiment_name>/         ← outputs written here by training jobs
+
+spectral-reconstruction-experiments/
+  <experiment_name>/         ← outputs written here by training/reconstruction jobs
     <timestamp>/
       config.json
       checkpoints/
@@ -131,8 +134,8 @@ brew install rclone   # macOS
 # Configure an R2 remote (run once)
 rclone config create r2 s3 \
   provider=Cloudflare \
-  access_key_id=<R2_ACCESS_KEY_ID> \
-  secret_access_key=<R2_SECRET_ACCESS_KEY> \
+  access_key_id=<SPECTRAL_RECONSTRUCTION_R2_ACCESS_KEY_ID> \
+  secret_access_key=<SPECTRAL_RECONSTRUCTION_R2_SECRET_ACCESS_KEY> \
   endpoint=https://<ACCOUNT_ID>.r2.cloudflarestorage.com
 
 # List top-level contents
@@ -151,8 +154,8 @@ rclone copy /local/path/to/landsat_val_npy \
 ### Option B – AWS CLI
 
 ```bash
-aws configure set aws_access_key_id     <R2_ACCESS_KEY_ID>
-aws configure set aws_secret_access_key <R2_SECRET_ACCESS_KEY>
+aws configure set aws_access_key_id     <SPECTRAL_RECONSTRUCTION_R2_ACCESS_KEY_ID>
+aws configure set aws_secret_access_key <SPECTRAL_RECONSTRUCTION_R2_SECRET_ACCESS_KEY>
 
 ENDPOINT=https://<ACCOUNT_ID>.r2.cloudflarestorage.com
 
@@ -316,7 +319,7 @@ When creating or editing a **Pod template** or deploying a **Pod**:
 
 > **Important:** RunPod uses **Container Registry Auth** to pull the image at startup.
 > Do **not** put `GHCR_TOKEN` in the pod's environment variables — that does not
-> authenticate the image pull. Env vars are only for your app (R2, API_KEY, etc.).
+> authenticate the image pull. Env vars are only for your app (R2, SPECTRAL_RECONSTRUCTION_API_KEY, etc.).
 
 ### 5c. GitHub Actions auto-build (no extra trigger)
 
@@ -348,12 +351,13 @@ On success the image is tagged `:sandbox` on GHCR.
 4. Under **Environment Variables**, add:
 
 ```
-R2_ACCESS_KEY_ID     = <your value>
-R2_SECRET_ACCESS_KEY = <your value>
-R2_ENDPOINT_URL      = https://<ACCOUNT_ID>.r2.cloudflarestorage.com
-R2_BUCKET_NAME       = spectral-reconstruction-data-ena
-API_KEY              = <a strong random string>
-PORT                 = 8000
+SPECTRAL_RECONSTRUCTION_R2_ACCESS_KEY_ID              = <your value>
+SPECTRAL_RECONSTRUCTION_R2_SECRET_ACCESS_KEY          = <your value>
+SPECTRAL_RECONSTRUCTION_R2_ENDPOINT_URL               = https://<ACCOUNT_ID>.r2.cloudflarestorage.com
+SPECTRAL_RECONSTRUCTION_R2_BUCKET_NAME                = spectral-reconstruction-data-ena
+SPECTRAL_RECONSTRUCTION_R2_BUCKET_NAME_EXPERIMENTS    = spectral-reconstruction-experiments
+SPECTRAL_RECONSTRUCTION_API_KEY                       = <a strong random string>
+SPECTRAL_RECONSTRUCTION_PORT                          = 8000
 ```
 
 > **Tip:** Store R2 and API secrets in **RunPod Secrets** (Settings → Secrets)
@@ -389,13 +393,13 @@ Once the pod is running:
 
 ## 7. Run your first experiment
 
-All examples use `curl` with a bearer token. Replace `$API_KEY` and `$POD_URL`
+All examples use `curl` with a bearer token. Replace `$SPECTRAL_RECONSTRUCTION_API_KEY` and `$POD_URL`
 with your actual values.
 
 ```bash
 POD_URL=https://abc123-8000.proxy.runpod.net
-API_KEY=your_api_key_here
-AUTH="Authorization: Bearer $API_KEY"
+SPECTRAL_RECONSTRUCTION_API_KEY=your_api_key_here
+AUTH="Authorization: Bearer $SPECTRAL_RECONSTRUCTION_API_KEY"
 ```
 
 ### Step 1 – Train the autoencoder
@@ -415,8 +419,8 @@ curl -s -X POST "$POD_URL/train" \
     "batch_size": 32,
     "experiment_name": "autoencoder_150_100_75",
     "r2": {
-      "access_key_id":     "'$R2_ACCESS_KEY_ID'",
-      "secret_access_key": "'$R2_SECRET_ACCESS_KEY'",
+      "access_key_id":     "'$SPECTRAL_RECONSTRUCTION_R2_ACCESS_KEY_ID'",
+      "secret_access_key": "'$SPECTRAL_RECONSTRUCTION_R2_SECRET_ACCESS_KEY'",
       "endpoint_url":      "https://<ACCOUNT_ID>.r2.cloudflarestorage.com",
       "bucket":            "spectral-reconstruction-data-ena"
     }
@@ -499,15 +503,15 @@ curl -s "$POD_URL/experiments" -H "$AUTH" | python3 -m json.tool
 
 ```bash
 # Using rclone (lists everything under an experiment)
-rclone ls r2:spectral-reconstruction-data-ena/reconstruction_test/
+rclone ls r2:spectral-reconstruction-experiments/reconstruction_test/
 
 # Download plots
-rclone copy r2:spectral-reconstruction-data-ena/reconstruction_test/20240601_140000/plots \
+rclone copy r2:spectral-reconstruction-experiments/reconstruction_test/20240601_140000/plots \
   ./local_plots/ --progress
 
 # Download trained model
 rclone copy \
-  r2:spectral-reconstruction-data-ena/sr_perceptual_150_100_75/20240601_130000/output/checkpoint_epoch_final.pt \
+  r2:spectral-reconstruction-experiments/sr_perceptual_150_100_75/20240601_130000/output/checkpoint_epoch_final.pt \
   ./models/
 ```
 
@@ -567,8 +571,8 @@ spectral-sr train ... \
 | `CUDA out of memory` | Batch size too large | Reduce `--batch-size` (try 8 or 16) |
 | `No .npy files found` | Wrong path or empty download | Verify R2 keys with `rclone ls r2:spectral-reconstruction-data-ena/hyperion_train_npy/` |
 | `hyperion_val_dir does not exist` | Val splits not uploaded | Create and upload `hyperion_val_npy/` and `landsat_val_npy/` (see §3) |
-| API returns 401 | `API_KEY` mismatch | Check `Authorization: Bearer <key>` header |
-| Container fails to start | Port conflict | Set `PORT=8000` in RunPod env vars |
+| API returns 401 | `SPECTRAL_RECONSTRUCTION_API_KEY` mismatch | Check `Authorization: Bearer <key>` header |
+| Container fails to start | Port conflict | Set `SPECTRAL_RECONSTRUCTION_PORT=8000` in RunPod env vars |
 | `unauthorized` / `denied` pulling image | Private GHCR package without registry auth | Create PAT (§4c), add Container Registry Auth (§5b), select it on the pod |
 | `unauthorized` pulling public image | Stale local `docker login` on your machine | Run `docker logout ghcr.io` and retry |
 | GHCR 403 with org package | PAT missing org/package access | Add `read:org` scope or grant package read on the org |
