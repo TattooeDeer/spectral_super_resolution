@@ -1,7 +1,8 @@
 # Single-stage image: pytorch base already ships torch/CUDA in conda.
 # uv sync skips those packages to avoid ~3GB duplicate installs that exhaust
 # GitHub Actions runner disk during multi-stage COPY.
-FROM pytorch/pytorch:2.2.2-cuda12.1-cudnn8-runtime
+# CUDA 12.8 + PyTorch 2.7+ required for Blackwell GPUs (sm_120, e.g. RTX PRO 4000).
+FROM pytorch/pytorch:2.7.1-cuda12.8-cudnn9-runtime
 
 # Bake release version into the image (override: docker build --build-arg APP_VERSION=1.2.3)
 ARG APP_VERSION=dev
