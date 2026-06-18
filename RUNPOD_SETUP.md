@@ -171,14 +171,25 @@ aws s3 sync /local/path/to/hyperion_val_npy \
 
 ### Option A – Let GitHub Actions build it (easiest)
 
-Every push to the `sandbox` branch automatically triggers
-`.github/workflows/docker.yml` — no separate GitHub trigger is required.
-The workflow builds and pushes the image to
-`ghcr.io/<your-github-username>/spectral_super_resolution`.
+`.github/workflows/docker.yml` publishes images from **`master`** and **release tags** only.
+Pushes to `sandbox` do not trigger a build — open a PR to `master` to validate the Dockerfile,
+then merge to publish.
 
-1. Push your changes: `git push origin sandbox`
-2. Watch the build at: `github.com/<user>/spectral_super_resolution/actions`
-3. Once green, the image is at: `ghcr.io/<user>/spectral_super_resolution:sandbox`
+| Trigger | Builds? | Pushes to GHCR? | Example tags |
+|---------|---------|-------------------|--------------|
+| PR → `master` | Yes | No | — |
+| Push to `master` | Yes | Yes | `:latest`, `:dev-<sha>`, `:sha-<sha>` |
+| Push tag `v1.0.0` | Yes | Yes | `:1.0.0`, `:1.0` |
+
+**Release workflow (recommended for RunPod):**
+
+1. Merge your changes into `master` via pull request
+2. Tag the release commit: `git tag v1.0.0 && git push origin v1.0.0`
+3. Watch the build at: `github.com/<user>/spectral_super_resolution/actions`
+4. Deploy with: `ghcr.io/<user>/spectral_super_resolution:1.0.0`
+
+For bleeding-edge deploys you can use `:latest` after a `master` push, but pinned semver
+tags (e.g. `:1.0.0`) are safer for production pods.
 
 The workflow uses the built-in `GITHUB_TOKEN` to push to GHCR; you do not need
 to create a `GHCR_TOKEN` secret for CI unless you customize the workflow.
@@ -197,10 +208,10 @@ export GHCR_TOKEN=ghp_xxxxxxxxxxxxxxxxxxxx
 echo "$GHCR_TOKEN" | docker login ghcr.io -u <github-username> --password-stdin
 
 # Build (takes ~5 min first time due to PyTorch download)
-docker build -t ghcr.io/<github-username>/spectral_super_resolution:sandbox .
+docker build -t ghcr.io/<github-username>/spectral_super_resolution:1.0.0 .
 
 # Push
-docker push ghcr.io/<github-username>/spectral_super_resolution:sandbox
+docker push ghcr.io/<github-username>/spectral_super_resolution:1.0.0
 ```
 
 ### 4c. Create a GitHub PAT (`GHCR_TOKEN`)
@@ -237,7 +248,7 @@ export GHCR_TOKEN=ghp_xxxxxxxxxxxxxxxxxxxx
 echo "$GHCR_TOKEN" | docker login ghcr.io -u <github-username> --password-stdin
 
 # Should download layers (public or private, depending on package visibility)
-docker pull ghcr.io/<github-username>/spectral_super_resolution:sandbox
+docker pull ghcr.io/<github-username>/spectral_super_resolution:1.0.0
 ```
 
 > **Security:** Treat `GHCR_TOKEN` like a password. Store it in a password manager,
@@ -312,7 +323,7 @@ Note the returned `id` — that is your `containerRegistryAuthId`.
 
 When creating or editing a **Pod template** or deploying a **Pod**:
 
-1. Set **Container image** to `ghcr.io/<github-username>/spectral_super_resolution:sandbox`
+1. Set **Container image** to `ghcr.io/<github-username>/spectral_super_resolution:1.0.0`
 2. In **Registry credentials** / **Container Registry Auth**, select **`ghcr-spectral-sr`**
    (the entry you created in Step 2)
 3. Continue with the rest of the pod settings in §5d
@@ -323,8 +334,15 @@ When creating or editing a **Pod template** or deploying a **Pod**:
 
 ### 5c. GitHub Actions auto-build (no extra trigger)
 
-Pushes to `sandbox` already trigger `.github/workflows/docker.yml`.
-You do **not** need to create a separate webhook or trigger in the GitHub UI.
+The workflow runs on **pull requests to `master`** (build only) and on **pushes to `master`**
+or **version tags** (`v*.*.*`) to publish images. You do **not** need a separate webhook
+or trigger in the GitHub UI.
+
+| Trigger | Publishes to GHCR? |
+|---------|-------------------|
+| PR → `master` | No (validates Dockerfile only) |
+| Push to `master` | Yes — `:latest`, `:dev-<sha>`, `:sha-<sha>` |
+| Push tag `v1.0.0` | Yes — `:1.0.0`, `:1.0` |
 
 | Repo visibility | Actions cost |
 |---------------|--------------|
@@ -332,7 +350,7 @@ You do **not** need to create a separate webhook or trigger in the GitHub UI.
 | **Private** | Free tier includes ~2 000 min/month; each Docker build is ~5–15 min |
 
 Watch builds at **github.com/<user>/spectral_super_resolution/actions**.
-On success the image is tagged `:sandbox` on GHCR.
+For RunPod, prefer a pinned release tag such as `:1.0.0`.
 
 ### 5d. Create a new pod
 
@@ -342,7 +360,7 @@ On success the image is tagged `:sandbox` on GHCR.
 
 | Field | Value |
 |-------|-------|
-| Container image | `ghcr.io/<github-username>/spectral_super_resolution:sandbox` |
+| Container image | `ghcr.io/<github-username>/spectral_super_resolution:1.0.0` |
 | Container Registry Auth | `ghcr-spectral-sr` *(§5b — skip if image is public)* |
 | Container disk | 20 GB |
 | Expose HTTP ports | `8000` |

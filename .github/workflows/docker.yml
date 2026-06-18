@@ -1,9 +1,11 @@
 name: Build and push Docker image to GHCR
 
+# PRs to master: build only (gate merges).
+# master push: build + push :latest, :dev-<sha>, :sha-<sha>.
+# v*.*.* tags: build + push semver tags (e.g. v1.0.0 → :1.0.0, :1.0).
 on:
   push:
     branches:
-      - sandbox
       - main
       - master
     tags:
@@ -105,9 +107,9 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      # Build only (no push) on sandbox and pull requests
+      # Build only (no push) on pull requests
       - name: Build Docker image
-        if: github.event_name == 'pull_request' || github.ref == 'refs/heads/sandbox'
+        if: github.event_name == 'pull_request'
         uses: docker/build-push-action@v5
         with:
           context: .
